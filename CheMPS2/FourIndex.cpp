@@ -1,6 +1,6 @@
 /*
    CheMPS2: a spin-adapted implementation of DMRG for ab initio quantum chemistry
-   Copyright (C) 2013, 2014 Sebastian Wouters
+   Copyright (C) 2013-2021 Sebastian Wouters
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -17,14 +17,18 @@
    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#include <cstdlib>
+#include <stdlib.h>
+#include <assert.h>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <climits>
+
+#include <hdf5.h>
 
 #include "FourIndex.h"
 #include "Lapack.h"
-#include "MyHDF5.h"
+#include "MPIchemps2.h"
 
 using namespace std;
 
@@ -33,14 +37,14 @@ CheMPS2::FourIndex::FourIndex(const int nGroup, const int * IrrepSizes){
    SymmInfo.setGroup(nGroup);
    
    Isizes = new int[SymmInfo.getNumberOfIrreps()];
-   storage = new long long****[SymmInfo.getNumberOfIrreps()];
-   
    for (int Icenter=0; Icenter<SymmInfo.getNumberOfIrreps(); Icenter++){
       Isizes[Icenter] = IrrepSizes[Icenter];
    }
    
    arrayLength = calcNumberOfUniqueElements(true); //true means allocate the storage!
    theElements = new double[arrayLength];
+   
+   Clear();
    
 }
 
@@ -49,14 +53,15 @@ long long CheMPS2::FourIndex::calcNumberOfUniqueElements(const bool allocate){
    //The object size: see text above storage in Fourindex.h
    long long theTotalSize = 0;
    
+   if (allocate){ storage = new long long****[SymmInfo.getNumberOfIrreps()]; }
    for (int Icenter=0; Icenter<SymmInfo.getNumberOfIrreps(); Icenter++){
       if (allocate){ storage[Icenter] = new long long***[SymmInfo.getNumberOfIrreps()]; }
       for (int I_i=0; I_i<SymmInfo.getNumberOfIrreps(); I_i++){
-         int I_j = SymmInfo.directProd(Icenter,I_i);
+         int I_j = Irreps::directProd(Icenter,I_i);
          if ((Isizes[I_i]>0)&&(Isizes[I_j]>0)){
             if (allocate){ storage[Icenter][I_i] = new long long**[SymmInfo.getNumberOfIrreps()]; }
             for (int I_k=I_i; I_k<SymmInfo.getNumberOfIrreps(); I_k++){
-               int I_l = SymmInfo.directProd(Icenter,I_k);
+               int I_l = Irreps::directProd(Icenter,I_k);
                if ((Isizes[I_k]>0)&&(Isizes[I_l]>0)){
                   if ((I_i <= I_j) && (I_j <= I_l)){
                      if (Icenter == 0){ // I_i = I_j and I_k = I_l
@@ -136,6 +141,7 @@ long long CheMPS2::FourIndex::calcNumberOfUniqueElements(const bool allocate){
       }
       if (!allocate){ delete [] storage[Icenter]; }
    }
+   if (!allocate){ delete [] storage; }
    
    return theTotalSize;
    
@@ -146,8 +152,13 @@ CheMPS2::FourIndex::~FourIndex(){
    arrayLength = calcNumberOfUniqueElements(false); //false means delete the storage!
    delete [] theElements;
    delete [] Isizes;
-   delete [] storage;
    
+}
+
+void CheMPS2::FourIndex::Clear(){
+
+   for (long long count = 0; count < arrayLength; count++){ theElements[ count ] = 0.0; }
+
 }
 
 void CheMPS2::FourIndex::set(const int irrep_i, const int irrep_j, const int irrep_k, const int irrep_l, const int i, const int j, const int k, const int l, const double val){
@@ -170,42 +181,40 @@ double CheMPS2::FourIndex::get(const int irrep_i, const int irrep_j, const int i
 
 long long CheMPS2::FourIndex::getPointer(const int irrep_i, const int irrep_j, const int irrep_k, const int irrep_l, const int i, const int j, const int k, const int l) const {
 
-   if (SymmInfo.directProd(irrep_i,irrep_j)==SymmInfo.directProd(irrep_k,irrep_l)){
+   assert( Irreps::directProd( irrep_i, irrep_j ) == Irreps::directProd( irrep_k, irrep_l ) );
 
-      if ((irrep_i <= irrep_j) && (irrep_i <= irrep_k) && (irrep_j <= irrep_l)){ // (ijkl irrep ordering)
-         return getPtrIrrepOrderOK(irrep_i,irrep_j,irrep_k,irrep_l,i,j,k,l);
-      }
-   
-      if ((irrep_j <= irrep_i) && (irrep_j <= irrep_l) && (irrep_i <= irrep_k)){ // (jilk irrep ordering)
-         return getPtrIrrepOrderOK(irrep_j,irrep_i,irrep_l,irrep_k,j,i,l,k);
-      }
-      
-      if ((irrep_k <= irrep_j) && (irrep_k <= irrep_i) && (irrep_j <= irrep_l)){ // (kjil irrep ordering)
-         return getPtrIrrepOrderOK(irrep_k,irrep_j,irrep_i,irrep_l,k,j,i,l);
-      }   
-      
-      if ((irrep_j <= irrep_k) && (irrep_j <= irrep_l) && (irrep_k <= irrep_i)){ // (jkli irrep ordering)
-         return getPtrIrrepOrderOK(irrep_j,irrep_k,irrep_l,irrep_i,j,k,l,i);
-      }   
-      
-      if ((irrep_i <= irrep_l) && (irrep_i <= irrep_k) && (irrep_l <= irrep_j)){ // (ilkj irrep ordering)
-         return getPtrIrrepOrderOK(irrep_i,irrep_l,irrep_k,irrep_j,i,l,k,j);
-      }   
-      
-      if ((irrep_l <= irrep_i) && (irrep_l <= irrep_j) && (irrep_i <= irrep_k)){ // (lijk irrep ordering)
-         return getPtrIrrepOrderOK(irrep_l,irrep_i,irrep_j,irrep_k,l,i,j,k);
-      }   
-      
-      if ((irrep_k <= irrep_l) && (irrep_k <= irrep_i) && (irrep_l <= irrep_j)){ // (klij irrep ordering)
-         return getPtrIrrepOrderOK(irrep_k,irrep_l,irrep_i,irrep_j,k,l,i,j);
-      }   
-      
-      if ((irrep_l <= irrep_k) && (irrep_l <= irrep_j) && (irrep_k <= irrep_i)){ // (lkji irrep ordering)
-         return getPtrIrrepOrderOK(irrep_l,irrep_k,irrep_j,irrep_i,l,k,j,i);
-      }
-        
+   if ((irrep_i <= irrep_j) && (irrep_i <= irrep_k) && (irrep_j <= irrep_l)){ // (ijkl irrep ordering)
+      return getPtrIrrepOrderOK(irrep_i,irrep_j,irrep_k,irrep_l,i,j,k,l);
    }
-   
+
+   if ((irrep_j <= irrep_i) && (irrep_j <= irrep_l) && (irrep_i <= irrep_k)){ // (jilk irrep ordering)
+      return getPtrIrrepOrderOK(irrep_j,irrep_i,irrep_l,irrep_k,j,i,l,k);
+   }
+
+   if ((irrep_k <= irrep_j) && (irrep_k <= irrep_i) && (irrep_j <= irrep_l)){ // (kjil irrep ordering)
+      return getPtrIrrepOrderOK(irrep_k,irrep_j,irrep_i,irrep_l,k,j,i,l);
+   }
+
+   if ((irrep_j <= irrep_k) && (irrep_j <= irrep_l) && (irrep_k <= irrep_i)){ // (jkli irrep ordering)
+      return getPtrIrrepOrderOK(irrep_j,irrep_k,irrep_l,irrep_i,j,k,l,i);
+   }
+
+   if ((irrep_i <= irrep_l) && (irrep_i <= irrep_k) && (irrep_l <= irrep_j)){ // (ilkj irrep ordering)
+      return getPtrIrrepOrderOK(irrep_i,irrep_l,irrep_k,irrep_j,i,l,k,j);
+   }
+
+   if ((irrep_l <= irrep_i) && (irrep_l <= irrep_j) && (irrep_i <= irrep_k)){ // (lijk irrep ordering)
+      return getPtrIrrepOrderOK(irrep_l,irrep_i,irrep_j,irrep_k,l,i,j,k);
+   }
+
+   if ((irrep_k <= irrep_l) && (irrep_k <= irrep_i) && (irrep_l <= irrep_j)){ // (klij irrep ordering)
+      return getPtrIrrepOrderOK(irrep_k,irrep_l,irrep_i,irrep_j,k,l,i,j);
+   }
+
+   if ((irrep_l <= irrep_k) && (irrep_l <= irrep_j) && (irrep_k <= irrep_i)){ // (lkji irrep ordering)
+      return getPtrIrrepOrderOK(irrep_l,irrep_k,irrep_j,irrep_i,l,k,j,i);
+   }
+
    return -1;
 
 }
@@ -213,66 +222,66 @@ long long CheMPS2::FourIndex::getPointer(const int irrep_i, const int irrep_j, c
 long long CheMPS2::FourIndex::getPtrIrrepOrderOK(const int irrep_i, const int irrep_j, const int irrep_k, const int irrep_l, const int i, const int j, const int k, const int l) const {
 
    //I_i <= I_j <= I_l and I_i <= I_k
-   int Icenter = SymmInfo.directProd(irrep_i,irrep_j);
+   int Icenter = Irreps::directProd(irrep_i,irrep_j);
    
    if (Icenter>0){ // I_i < I_j and I_k != I_l
    
       if (irrep_i == irrep_k){ //and hence I_j == I_l
       
          if (k>=i){
-            if (l>=j) return getPtrAllOK(5, Icenter, irrep_i, irrep_k, i, j, k, l);
-            else      return getPtrAllOK(5, Icenter, irrep_i, irrep_k, i, l, k, j);
+            if (l>=j) return getPtrAllOK5(Icenter, irrep_i, irrep_k, i, j, k, l);
+            else      return getPtrAllOK5(Icenter, irrep_i, irrep_k, i, l, k, j);
          } else {
-            if (l>=j) return getPtrAllOK(5, Icenter, irrep_k, irrep_i, k, j, i, l);
-            else      return getPtrAllOK(5, Icenter, irrep_k, irrep_i, k, l, i, j);
+            if (l>=j) return getPtrAllOK5(Icenter, irrep_k, irrep_i, k, j, i, l);
+            else      return getPtrAllOK5(Icenter, irrep_k, irrep_i, k, l, i, j);
          }
       
-      } else return getPtrAllOK(6, Icenter, irrep_i, irrep_k, i, j, k, l);
+      } else { return storage[Icenter][irrep_i][irrep_k][i + Isizes[irrep_i]*k][j] + l; }
    
    } else {
    
       if (irrep_i == irrep_k){ // all irreps the same
       
          //i en j
-         if ((i <  j) && (i <= k) && (j <= l)) return getPtrAllOK(2, Icenter, irrep_i, irrep_k, i, j, k, l); // (ijkl ordering) 
+         if ((i <  j) && (i <= k) && (j <= l)) return getPtrAllOK2(Icenter, irrep_i, irrep_k, i, j, k, l); // (ijkl ordering) 
          if ((i == j) && (i <= k) && (j <= l)){
-            if (l>=k) return getPtrAllOK(1, Icenter, irrep_i, irrep_k, i, j, k, l); // (ijkl ordering)
-            else      return getPtrAllOK(1, Icenter, irrep_j, irrep_l, j, i, l, k); // (jilk ordering)
+            if (l>=k) return getPtrAllOK1(Icenter, irrep_i, irrep_k, i, j, k, l); // (ijkl ordering)
+            else      return getPtrAllOK1(Icenter, irrep_j, irrep_l, j, i, l, k); // (jilk ordering)
          }
-         if ((j <  i) && (j <= l) && (i <= k)) return getPtrAllOK(2, Icenter, irrep_j, irrep_l, j, i, l, k); // (jilk ordering)
+         if ((j <  i) && (j <= l) && (i <= k)) return getPtrAllOK2(Icenter, irrep_j, irrep_l, j, i, l, k); // (jilk ordering)
          
          //k en l
-         if ((k <  l) && (k <= i) && (l <= j)) return getPtrAllOK(2, Icenter, irrep_k, irrep_i, k, l, i, j); // (klij ordering)
+         if ((k <  l) && (k <= i) && (l <= j)) return getPtrAllOK2(Icenter, irrep_k, irrep_i, k, l, i, j); // (klij ordering)
          if ((k == l) && (k <= i) && (l <= j)){
-            if (j>=i) return getPtrAllOK(1, Icenter, irrep_k, irrep_i, k, l, i, j); // (klij ordering)
-            else      return getPtrAllOK(1, Icenter, irrep_l, irrep_j, l, k, j, i); // (lkji ordering)
+            if (j>=i) return getPtrAllOK1(Icenter, irrep_k, irrep_i, k, l, i, j); // (klij ordering)
+            else      return getPtrAllOK1(Icenter, irrep_l, irrep_j, l, k, j, i); // (lkji ordering)
          }
-         if ((l <  k) && (l <= j) && (k <= i)) return getPtrAllOK(2, Icenter, irrep_l, irrep_j, l, k, j, i); // (lkji ordering)
+         if ((l <  k) && (l <= j) && (k <= i)) return getPtrAllOK2(Icenter, irrep_l, irrep_j, l, k, j, i); // (lkji ordering)
 
          // k en j
-         if ((k <  j) && (k <= i) && (j <= l)) return getPtrAllOK(2, Icenter, irrep_k, irrep_i, k, j, i, l); // (kjil ordering)
+         if ((k <  j) && (k <= i) && (j <= l)) return getPtrAllOK2(Icenter, irrep_k, irrep_i, k, j, i, l); // (kjil ordering)
          if ((k == j) && (k <= i) && (j <= l)){
-            if (l>=i) return getPtrAllOK(1, Icenter, irrep_k, irrep_i, k, j, i, l); // (kjil ordering)
-            else      return getPtrAllOK(1, Icenter, irrep_j, irrep_l, j, k, l, i); // (jkli ordering)
+            if (l>=i) return getPtrAllOK1(Icenter, irrep_k, irrep_i, k, j, i, l); // (kjil ordering)
+            else      return getPtrAllOK1(Icenter, irrep_j, irrep_l, j, k, l, i); // (jkli ordering)
          }
-         if ((j <  k) && (j <= l) && (k <= i)) return getPtrAllOK(2, Icenter, irrep_j, irrep_l, j, k, l, i); // (jkli ordering)
+         if ((j <  k) && (j <= l) && (k <= i)) return getPtrAllOK2(Icenter, irrep_j, irrep_l, j, k, l, i); // (jkli ordering)
          
          // i en l
-         if ((i <  l) && (i <= k) && (l <= j)) return getPtrAllOK(2, Icenter, irrep_i, irrep_k, i, l, k, j); // (ilkj ordering)
+         if ((i <  l) && (i <= k) && (l <= j)) return getPtrAllOK2(Icenter, irrep_i, irrep_k, i, l, k, j); // (ilkj ordering)
          if ((i == l) && (i <= k) && (l <= j)){
-            if (j>=k) return getPtrAllOK(1, Icenter, irrep_i, irrep_k, i, l, k, j); // (ilkj ordering)
-            else      return getPtrAllOK(1, Icenter, irrep_l, irrep_j, l, i, j, k); // (lijk ordering)
+            if (j>=k) return getPtrAllOK1(Icenter, irrep_i, irrep_k, i, l, k, j); // (ilkj ordering)
+            else      return getPtrAllOK1(Icenter, irrep_l, irrep_j, l, i, j, k); // (lijk ordering)
          }
-         if ((l <  i) && (l <= j) && (i <= k)) return getPtrAllOK(2, Icenter, irrep_l, irrep_j, l, i, j, k); // (lijk ordering) 
+         if ((l <  i) && (l <= j) && (i <= k)) return getPtrAllOK2(Icenter, irrep_l, irrep_j, l, i, j, k); // (lijk ordering) 
 
       } else {
       
          if (j==i){
-            if (l>=k) return getPtrAllOK(3, Icenter, irrep_i, irrep_k, i, j, k, l);
-            else      return getPtrAllOK(3, Icenter, irrep_j, irrep_l, j, i, l, k);
+            if (l>=k){ return storage[Icenter][irrep_i][irrep_k][i + Isizes[irrep_i]*k][j-i] + l-k; }
+            else     { return storage[Icenter][irrep_j][irrep_l][j + Isizes[irrep_j]*l][i-j] + k-l; }
          } else {
-            if (j>i)  return getPtrAllOK(4, Icenter, irrep_i, irrep_k, i, j, k, l);
-            else      return getPtrAllOK(4, Icenter, irrep_j, irrep_l, j, i, l, k);
+            if (j>i){  return storage[Icenter][irrep_i][irrep_k][i + Isizes[irrep_i]*k][j-i] + l; }
+            else    {  return storage[Icenter][irrep_j][irrep_l][j + Isizes[irrep_j]*l][i-j] + k; }
          }
          
       }
@@ -283,24 +292,23 @@ long long CheMPS2::FourIndex::getPtrIrrepOrderOK(const int irrep_i, const int ir
    
 }
 
-long long CheMPS2::FourIndex::getPtrAllOK(const int number, const int Icent, const int irrep_i, const int irrep_k, const int i, const int j, const int k, const int l) const {
+int CheMPS2::FourIndex::get_irrep_size( const int irrep ) const{ return Isizes[ irrep ]; }
 
-   switch (number){
-      case 1:
-         return storage[Icent][irrep_i][irrep_k][i + k*(k+1)/2][j-i] + l-k;
-      case 2:
-         return storage[Icent][irrep_i][irrep_k][i + k*(k+1)/2][j-i] + l-j;
-      case 3:
-         return storage[Icent][irrep_i][irrep_k][i + Isizes[irrep_i]*k][j-i] + l-k;
-      case 4:
-         return storage[Icent][irrep_i][irrep_k][i + Isizes[irrep_i]*k][j-i] + l;
-      case 5:
-         return storage[Icent][irrep_i][irrep_k][i + k*(k+1)/2][j] + l-j;
-      case 6:
-         return storage[Icent][irrep_i][irrep_k][i + Isizes[irrep_i]*k][j] + l;
-   }
-   
-   return -1;
+long long CheMPS2::FourIndex::getPtrAllOK1(const int Icent, const int irrep_i, const int irrep_k, const int i, const int j, const int k, const int l) const{
+
+   return storage[Icent][irrep_i][irrep_k][i + k*(k+1)/2][j-i] + l-k;
+
+}
+
+long long CheMPS2::FourIndex::getPtrAllOK2(const int Icent, const int irrep_i, const int irrep_k, const int i, const int j, const int k, const int l) const{
+
+   return storage[Icent][irrep_i][irrep_k][i + k*(k+1)/2][j-i] + l-j;
+
+}
+
+long long CheMPS2::FourIndex::getPtrAllOK5(const int Icent, const int irrep_i, const int irrep_k, const int i, const int j, const int k, const int l) const{
+
+   return storage[Icent][irrep_i][irrep_k][i + k*(k+1)/2][j] + l-j;
 
 }
 
@@ -377,17 +385,17 @@ void CheMPS2::FourIndex::read(const std::string name){
             hid_t attribute_id1 = H5Aopen_by_name(group_id,"IrrepSizes", "nGroup", H5P_DEFAULT, H5P_DEFAULT);
             int nGroup;
             H5Aread(attribute_id1, H5T_NATIVE_INT, &nGroup);
-            if (nGroup != SymmInfo.getGroupNumber()) std::cerr << "Error at FourIndex::read : nGroup doesn't match." << std::endl;
+            assert( nGroup==SymmInfo.getGroupNumber() );
             
             hid_t attribute_id2 = H5Aopen_by_name(group_id,"IrrepSizes", "nIrreps", H5P_DEFAULT, H5P_DEFAULT);
             int nIrreps;
             H5Aread(attribute_id2, H5T_NATIVE_INT, &nIrreps);
-            if (nIrreps != SymmInfo.getNumberOfIrreps()) std::cerr << "Error at FourIndex::read : nIrreps doesn't match." << std::endl;
+            assert( nIrreps==SymmInfo.getNumberOfIrreps() );
             
             hid_t attribute_id3 = H5Aopen_by_name(group_id,"IrrepSizes", "theTotalSize", H5P_DEFAULT, H5P_DEFAULT);
             long long theTotalSize;
             H5Aread(attribute_id3, H5T_NATIVE_LLONG, &theTotalSize);
-            if (theTotalSize != arrayLength) std::cerr << "Error at FourIndex::read : the number of unique FourIndex elements doesn't match." << std::endl;
+            assert( theTotalSize==arrayLength );
 
             H5Aclose(attribute_id1);
             H5Aclose(attribute_id2);
@@ -396,7 +404,7 @@ void CheMPS2::FourIndex::read(const std::string name){
          int * IsizesAgain = new int[SymmInfo.getNumberOfIrreps()];
          H5Dread(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, IsizesAgain);
          for (int cnt=0; cnt<SymmInfo.getNumberOfIrreps(); cnt++){
-            if (IsizesAgain[cnt]!=Isizes[cnt]) std::cerr << "Error at FourIndex::read : One of the Isizes doesn't match." << std::endl;
+            assert( IsizesAgain[cnt]==Isizes[cnt] );
          }
          delete [] IsizesAgain;
          H5Dclose(dataset_id);
@@ -419,4 +427,16 @@ void CheMPS2::FourIndex::read(const std::string name){
    std::cout << "FourIndex::read : everything loaded!" << std::endl;
 
 }
+
+#ifdef CHEMPS2_MPI_COMPILATION
+void CheMPS2::FourIndex::broadcast( const int ROOT ){
+
+   assert( arrayLength <= INT_MAX ); // To be able to broadcast
+   const int size = ( int )( arrayLength );
+   if ( size > 0 ){
+      MPIchemps2::broadcast_array_double( theElements, size, ROOT );
+   }
+
+}
+#endif
 

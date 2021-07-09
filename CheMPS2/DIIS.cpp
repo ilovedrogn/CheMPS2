@@ -1,6 +1,6 @@
 /*
    CheMPS2: a spin-adapted implementation of DMRG for ab initio quantum chemistry
-   Copyright (C) 2013, 2014 Sebastian Wouters
+   Copyright (C) 2013-2021 Sebastian Wouters
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -18,19 +18,20 @@
 */
 
 #include <stdlib.h>
+#include <assert.h>
 #include <iostream>
 #include <fstream>
 #include <string>
-#include <math.h>
 #include <sstream>
+#include <math.h>
 
-#include "MyHDF5.h"
+#include <hdf5.h>
+
 #include "Lapack.h"
 #include "DIIS.h"
 
 using std::string;
 using std::ifstream;
-using std::cerr;
 using std::cout;
 using std::endl;
 
@@ -230,21 +231,21 @@ void CheMPS2::DIIS::loadDIIS(const string filename){
    hid_t dataset_id2 = H5Dopen(group_id, "numVarsParam", H5P_DEFAULT);
    H5Dread(dataset_id2, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, &numVarsBIS);
    H5Dclose(dataset_id2);
-   if (numVarsParam != numVarsBIS) cerr << "Error at DIIS::loadDIIS : numVarsParam doesn't match." << endl;
+   assert( numVarsParam==numVarsBIS );
    
    //The error vector sizes
    hid_t dataset_id5 = H5Dopen(group_id, "numVarsError", H5P_DEFAULT);
    H5Dread(dataset_id5, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, &numVarsBIS);
    H5Dclose(dataset_id5);
-   if (numVarsError != numVarsBIS) cerr << "Error at DIIS::loadDIIS : numVarsError doesn't match." << endl;
+   assert( numVarsError==numVarsBIS );
    
    //The number of vectors saved
    int currentNumVecsBIS;
    hid_t dataset_id1 = H5Dopen(group_id, "currentNumVecs", H5P_DEFAULT);
    H5Dread(dataset_id1, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, &currentNumVecsBIS);
    H5Dclose(dataset_id1);
-   if (currentNumVecsBIS > numVecs) cerr << "Error at DIIS::loadDIIS : currentNumVecs is too large." << endl;
-   if (currentNumVecsBIS < 0)       cerr << "Error at DIIS::loadDIIS : currentNumVecs is smaller than zero." << endl;
+   assert( currentNumVecsBIS<=numVecs );
+   assert( currentNumVecsBIS>=0 );
    
    //Create just enough storage for the vectors to be loaded
    if (currentNumVecs < currentNumVecsBIS){
@@ -285,15 +286,4 @@ void CheMPS2::DIIS::loadDIIS(const string filename){
    H5Fclose(file_id);
 
 }
-
-void CheMPS2::DIIS::deleteStoredDIIS(const string filename) const{
-
-   std::stringstream temp;
-   temp << "rm " << filename;
-   int info = system(temp.str().c_str());
-   cout << "Info on CASSCF::DIIS rm call to system: " << info << endl;
-
-}
-
-
 

@@ -1,6 +1,6 @@
 /*
    CheMPS2: a spin-adapted implementation of DMRG for ab initio quantum chemistry
-   Copyright (C) 2013, 2014 Sebastian Wouters
+   Copyright (C) 2013-2018 Sebastian Wouters
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -18,18 +18,19 @@
 */
 
 #include <stdlib.h>
+#include <assert.h>
 #include <iostream>
+#include <algorithm>
 
 #include "DMRGSCFindices.h"
 
-using std::cerr;
 using std::cout;
 using std::endl;
+using std::max;
 
 CheMPS2::DMRGSCFindices::DMRGSCFindices(const int L, const int Group, int * NOCCin, int * NDMRGin, int * NVIRTin){
 
    this->L = L;
-   this->Group = Group;
    SymmInfo.setGroup(Group);
    this->Nirreps = SymmInfo.getNumberOfIrreps();
    
@@ -40,32 +41,36 @@ CheMPS2::DMRGSCFindices::DMRGSCFindices(const int L, const int Group, int * NOCC
    NORBcumulative  = new int[Nirreps+1];
    NDMRGcumulative = new int[Nirreps+1];
    
-   int sum_check = 0;
+   int totalNumOrbs = 0;
    NORBcumulative[0]  = 0;
    NDMRGcumulative[0] = 0;
    for (int irrep=0; irrep<Nirreps; irrep++){
    
-      if (NOCCin[irrep]  < 0){ cerr << "DMRGSCFindices::DMRGSCFindices : NOCC["  << irrep << "] = " << NOCCin[ irrep] << endl; }
-      if (NDMRGin[irrep] < 0){ cerr << "DMRGSCFindices::DMRGSCFindices : NDMRG[" << irrep << "] = " << NDMRGin[irrep] << endl; }
-      if (NVIRTin[irrep] < 0){ cerr << "DMRGSCFindices::DMRGSCFindices : NVIRT[" << irrep << "] = " << NVIRTin[irrep] << endl; }
+      assert( NOCCin [irrep]>=0 );
+      assert( NDMRGin[irrep]>=0 );
+      assert( NVIRTin[irrep]>=0 );
       
       NORB[ irrep] = NOCCin[ irrep] + NDMRGin[irrep] + NVIRTin[irrep];
       NOCC[ irrep] = NOCCin[ irrep];
       NDMRG[irrep] = NDMRGin[irrep];
       NVIRT[irrep] = NVIRTin[irrep];
       
-      sum_check += NORB[irrep];
+      totalNumOrbs += NORB[irrep];
       
       NORBcumulative[ irrep+1] = NORBcumulative[ irrep] + NORB[irrep];
       NDMRGcumulative[irrep+1] = NDMRGcumulative[irrep] + NDMRG[irrep];
       
    }
-   if (sum_check != L){ cerr << "DMRGSCFindices::DMRGSCFindices : Sum over all OCC, DMRG and VIRT orbitals is not L." << endl; }
+   assert( totalNumOrbs==L );
    
    irrepOfEachDMRGorbital = new int[NDMRGcumulative[Nirreps]];
+   irrepOfEachOrbital = new int[L];
    for (int irrep=0; irrep<Nirreps; irrep++){
       for (int cnt=0; cnt<NDMRG[irrep]; cnt++){
          irrepOfEachDMRGorbital[ NDMRGcumulative[irrep] + cnt ] = irrep;
+      }
+      for (int cnt=0; cnt<NORB[irrep]; cnt++){
+         irrepOfEachOrbital[ NORBcumulative[irrep] + cnt ] = irrep;
       }
    }
 
@@ -80,10 +85,13 @@ CheMPS2::DMRGSCFindices::~DMRGSCFindices(){
    delete [] NORBcumulative;
    delete [] NDMRGcumulative;
    delete [] irrepOfEachDMRGorbital;
+   delete [] irrepOfEachOrbital;
 
 }
 
 int CheMPS2::DMRGSCFindices::getL() const{ return L; }
+
+int CheMPS2::DMRGSCFindices::getGroupNumber() const{ return SymmInfo.getGroupNumber(); }
 
 int CheMPS2::DMRGSCFindices::getNirreps() const{ return Nirreps; }
 
@@ -104,6 +112,32 @@ int CheMPS2::DMRGSCFindices::getOrigNDMRGstart(const int irrep) const{ return NO
 int CheMPS2::DMRGSCFindices::getOrigNVIRTstart(const int irrep) const{ return NORBcumulative[irrep+1] - NVIRT[irrep]; }
 
 int * CheMPS2::DMRGSCFindices::getIrrepOfEachDMRGorbital(){ return irrepOfEachDMRGorbital; }
+
+int CheMPS2::DMRGSCFindices::getOrbitalIrrep(const int index) const{ return irrepOfEachOrbital[index]; }
+
+int CheMPS2::DMRGSCFindices::getNOCCsum() const{
+
+   int total = 0;
+   for ( int irrep = 0; irrep < getNirreps(); irrep++ ){ total += getNOCC( irrep ); }
+   return total;
+
+}
+
+int CheMPS2::DMRGSCFindices::getNORBmax() const{
+
+   int the_max = 0;
+   for ( int irrep = 0; irrep < getNirreps(); irrep++ ){ the_max = max( the_max, getNORB( irrep ) ); }
+   return the_max;
+
+}
+
+int CheMPS2::DMRGSCFindices::getROTparamsize() const{
+
+   int paramsize = 0;
+   for ( int irrep = 0; irrep < getNirreps(); irrep++ ){ paramsize += ( getNORB( irrep ) * ( getNORB( irrep ) - 1 ) ) / 2; }
+   return paramsize;
+
+}
 
 void CheMPS2::DMRGSCFindices::Print() const{
 

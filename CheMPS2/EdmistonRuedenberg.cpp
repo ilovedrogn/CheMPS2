@@ -1,6 +1,6 @@
 /*
    CheMPS2: a spin-adapted implementation of DMRG for ab initio quantum chemistry
-   Copyright (C) 2013, 2014 Sebastian Wouters
+   Copyright (C) 2013-2018 Sebastian Wouters
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -18,33 +18,37 @@
 */
 
 #include <stdlib.h>
+#include <assert.h>
 #include <iostream>
 #include <math.h>
 #include <algorithm>
 
 #include "EdmistonRuedenberg.h"
-#include "DMRGSCFVmatRotations.h"
+#include "DMRGSCFrotations.h"
 #include "Lapack.h"
 
 using std::cout;
-using std::cerr;
 using std::endl;
 using std::max;
 
-CheMPS2::EdmistonRuedenberg::EdmistonRuedenberg(Hamiltonian * HamIn, const int printLevelIn){
+CheMPS2::EdmistonRuedenberg::EdmistonRuedenberg( const FourIndex * Vmat, const int group, const int printLevelIn ){
 
-   Ham = HamIn;
+   VMAT_ORIG = Vmat;
    printLevel = printLevelIn;
-   SymmInfo.setGroup(Ham->getNGroup());
+   SymmInfo.setGroup( group );
    
-   int * Isizes = new int[SymmInfo.getNumberOfIrreps()];
-   int * Zeroes = new int[SymmInfo.getNumberOfIrreps()];
-   for (int irrep=0; irrep<SymmInfo.getNumberOfIrreps(); irrep++){ Isizes[irrep] = Zeroes[irrep] = 0; }
-   for (int orb=0; orb<Ham->getL(); orb++){ Isizes[Ham->getOrbitalIrrep(orb)]++; }
+   int * Isizes = new int[ SymmInfo.getNumberOfIrreps() ];
+   int * Zeroes = new int[ SymmInfo.getNumberOfIrreps() ];
+   int L = 0;
+   for ( int irrep = 0; irrep < SymmInfo.getNumberOfIrreps(); irrep++ ){
+      Isizes[ irrep ] = VMAT_ORIG->get_irrep_size( irrep );
+      Zeroes[ irrep ] = 0;
+      L += Isizes[ irrep ];
+   }
    
-   iHandler = new DMRGSCFindices(Ham->getL(), Ham->getNGroup(), Zeroes, Isizes, Zeroes); //Supposes all orbitals are active
-   unitary  = new DMRGSCFunitary(iHandler);
-   VmatRotated = new FourIndex(Ham->getNGroup(), Isizes);
+   iHandler = new DMRGSCFindices( L, group, Zeroes, Isizes, Zeroes ); //Supposes all orbitals are active
+   unitary  = new DMRGSCFunitary( iHandler );
+   VmatRotated = new FourIndex( group, Isizes );
    
    delete [] Zeroes;
    delete [] Isizes;
@@ -59,32 +63,29 @@ CheMPS2::EdmistonRuedenberg::~EdmistonRuedenberg(){
       
 }
 
-double CheMPS2::EdmistonRuedenberg::Optimize(double * temp1, double * temp2, const double gradThreshold, const int maxIter){
+double CheMPS2::EdmistonRuedenberg::Optimize(double * temp1, double * temp2, const bool startFromRandomUnitary, const double gradThreshold, const int maxIter){
 
    //Clear the unitary
-   for (int irrep=0; irrep<SymmInfo.getNumberOfIrreps(); irrep++){
-      const int linsize = iHandler->getNORB(irrep);
-      double * block = unitary->getBlock(irrep);
-      for (int cnt=0; cnt<linsize*linsize; cnt++){ block[cnt] = 0.0; }
-      for (int cnt=0; cnt<linsize; cnt++){ block[cnt*(1+linsize)] = 1.0; }
-   }
-
-   DMRGSCFVmatRotations theRotator(Ham, iHandler);
+   unitary->identity();
 
    //Setting up the variables for the gradient
    double gradNorm = 1.0;
-   int numVariables = 0;
-   for (int irrep=0; irrep<SymmInfo.getNumberOfIrreps(); irrep++){
-      if (iHandler->getNORB(irrep) > 1){
-         numVariables += iHandler->getNORB(irrep) * (iHandler->getNORB(irrep) - 1) / 2;
-      }
-   }
+   const int numVariables = iHandler->getROTparamsize();
    double * gradient = new double[numVariables];
    for (int cnt=0; cnt<numVariables; cnt++){ gradient[cnt] = 0.0; }
-   
+
+   //Randomize the unitary if asked
+   if (startFromRandomUnitary){
+      for (int cnt=0; cnt<numVariables; cnt++){ gradient[cnt] = ((double) rand())/RAND_MAX - 0.5; }
+      unitary->updateUnitary(temp1, temp2, gradient, false, false); //multiply = compact = false
+      for (int cnt=0; cnt<numVariables; cnt++){ gradient[cnt] = 0.0; }
+   }
+
+   const int mem_size = iHandler->getL() * iHandler->getL() * iHandler->getL() * iHandler->getL();
+   DMRGSCFrotations::rotate( VMAT_ORIG, VmatRotated, NULL, 'F', 'F', 'F', 'F', iHandler, unitary, temp1, temp2, mem_size, "edmistonruedenberg" );
+
    //Setting up the variables for the cost function
-   double Icost = 0.0;
-   for (int orb=0; orb<Ham->getL(); orb++){ Icost += Ham->getVmat(orb,orb,orb,orb); }
+   double Icost = costFunction();
    if (printLevel>0){ cout << "   EdmistonRuedenberg::Optimize : Cost function at start = " << Icost << endl; }
    double Icost_previous = 0.0;
    
@@ -99,7 +100,7 @@ double CheMPS2::EdmistonRuedenberg::Optimize(double * temp1, double * temp2, con
    
       //Rotate the Vmat
       Icost_previous = Icost;
-      theRotator.fillVmatRotated(VmatRotated, unitary, temp1, temp2);
+      DMRGSCFrotations::rotate( VMAT_ORIG, VmatRotated, NULL, 'F', 'F', 'F', 'F', iHandler, unitary, temp1, temp2, mem_size, "edmistonruedenberg" );
       Icost = costFunction();
       
       /* What if the cost function has dimished? Then make the rotation step a bit smaller!
@@ -113,7 +114,7 @@ double CheMPS2::EdmistonRuedenberg::Optimize(double * temp1, double * temp2, con
             nIterationsBACK++;
             for (int cnt=0; cnt<numVariables; cnt++){ gradient[cnt] *= 0.5; }
             unitary->updateUnitary(temp1, temp2, gradient, true, false); //multiply = true; compact = false
-            theRotator.fillVmatRotated(VmatRotated, unitary, temp1, temp2);
+            DMRGSCFrotations::rotate( VMAT_ORIG, VmatRotated, NULL, 'F', 'F', 'F', 'F', iHandler, unitary, temp1, temp2, mem_size, "edmistonruedenberg" );
             Icost = costFunction();
          }
          if (printLevel>1){ cout << "                                     WARNING : Rotated back a bit. Now Icost = " << Icost << endl; }
@@ -270,10 +271,7 @@ void CheMPS2::EdmistonRuedenberg::Fiedler(const int irrep, int * reorder, double
    //For information on the Fiedler vector: see http://web.eecs.utk.edu/~mberry/order/node9.html
 
    int linsize = iHandler->getNORB(irrep);
-   if (linsize<2){
-      cerr << "   EdmistonRuedenberg::Fiedler : linsize < 2 !" << endl;
-      return;
-   }
+   assert( linsize>=2 );
    
    //Preamble: linsize>=2 at this point
    double * work = temp2;             //temp2 at least of size 4*linsize*linsize
@@ -310,11 +308,7 @@ void CheMPS2::EdmistonRuedenberg::Fiedler(const int irrep, int * reorder, double
       for (int cnt=0; cnt<linsize-1; cnt++){
          if (FiedlerVector[reorder[cnt]] > FiedlerVector[reorder[cnt+1]]){ isOK = false; }
       }
-      if (!isOK){
-         cerr << "   EdmistonRuedenberg::Fiedler : Reordered Fiedler vector is not OK = [ ";
-         for (int cnt=0; cnt<linsize-1; cnt++){ cerr << FiedlerVector[reorder[cnt]] << "  ,  "; }
-         cerr << FiedlerVector[reorder[linsize-1]] << " ]." << endl;
-      }
+      assert( isOK );
       cout << "                                 Reorder[" << irrep << "] = [ ";
       for (int cnt=0; cnt<linsize-1; cnt++){ cout << reorder[cnt] << "  ,  "; }
       cout << reorder[linsize-1] << " ]." << endl;
@@ -374,6 +368,9 @@ void CheMPS2::EdmistonRuedenberg::FiedlerExchange(const int maxlinsize, double *
 
    //For information on the Fiedler vector: see http://web.eecs.utk.edu/~mberry/order/node9.html
 
+   const int mem_size = iHandler->getL() * iHandler->getL() * iHandler->getL() * iHandler->getL();
+   DMRGSCFrotations::rotate( VMAT_ORIG, VmatRotated, NULL, 'F', 'F', 'F', 'F', iHandler, unitary, temp1, temp2, mem_size, "edmistonruedenberg" );
+
    if (printLevel>0){ cout << "   EdmistonRuedenberg::FiedlerExchange : Cost function at start = " << FiedlerExchangeCost() << endl; }
    
    int * reorder = new int[maxlinsize];
@@ -405,13 +402,92 @@ void CheMPS2::EdmistonRuedenberg::FiedlerExchange(const int maxlinsize, double *
    }
    
    delete [] reorder;
-   
-   DMRGSCFVmatRotations theRotator(Ham, iHandler);
-   theRotator.fillVmatRotated(VmatRotated, unitary, temp1, temp2);
-   
+
+   DMRGSCFrotations::rotate( VMAT_ORIG, VmatRotated, NULL, 'F', 'F', 'F', 'F', iHandler, unitary, temp1, temp2, mem_size, "edmistonruedenberg" );
+
    if (printLevel>0){ cout << "   EdmistonRuedenberg::FiedlerExchange : Cost function at end   = " << FiedlerExchangeCost() << endl; }
 
 }
 
+double CheMPS2::EdmistonRuedenberg::FiedlerGlobalCost( const DMRGSCFindices * idx, const FourIndex * VMAT_LOCAL, int * dmrg2ham ){
+
+   double cost = 0.0;
+
+   for ( int dmrg_row = 0; dmrg_row < idx->getL(); dmrg_row++ ){
+      for ( int dmrg_col = 0; dmrg_col < idx->getL(); dmrg_col++ ){
+         const int ham_row = dmrg2ham[ dmrg_row ];
+         const int ham_col = dmrg2ham[ dmrg_col ];
+         const int irrep_row = idx->getOrbitalIrrep( ham_row );
+         const int irrep_col = idx->getOrbitalIrrep( ham_col );
+         const int rel_row = ham_row - idx->getOrigNOCCstart( irrep_row );
+         const int rel_col = ham_col - idx->getOrigNOCCstart( irrep_col );
+         cost += VMAT_LOCAL->get( irrep_row, irrep_col, irrep_col, irrep_row, rel_row, rel_col, rel_col, rel_row ) * ( dmrg_row - dmrg_col ) * ( dmrg_row - dmrg_col );
+      }
+   }
+
+   return cost;
+
+}
+
+void CheMPS2::EdmistonRuedenberg::FiedlerGlobal( int * dmrg2ham ) const{
+
+   // For information on the Fiedler vector: see http://web.eecs.utk.edu/~mberry/order/node9.html
+
+   for ( int orb = 0; orb < iHandler->getL(); orb++ ){ dmrg2ham[ orb ] = orb; }
+   if ( printLevel > 0 ){ cout << "   EdmistonRuedenberg::FiedlerGlobal : Cost function at start = " << FiedlerGlobalCost( iHandler, VMAT_ORIG, dmrg2ham ) << endl; }
+
+   // Build the Laplacian
+   double * laplacian = new double[ iHandler->getL() * iHandler->getL() ];
+   for ( int ham_row = 0; ham_row < iHandler->getL(); ham_row++ ){
+      double sum_over_column = 0.0;
+      for ( int ham_col = 0; ham_col < iHandler->getL(); ham_col++ ){
+         if ( ham_row != ham_col ){
+            const int irrep_row = iHandler->getOrbitalIrrep( ham_row );
+            const int irrep_col = iHandler->getOrbitalIrrep( ham_col );
+            const int rel_row = ham_row - iHandler->getOrigNOCCstart( irrep_row );
+            const int rel_col = ham_col - iHandler->getOrigNOCCstart( irrep_col );
+            const double value = fabs( VMAT_ORIG->get( irrep_row, irrep_col, irrep_col, irrep_row, rel_row, rel_col, rel_col, rel_row ) );
+            laplacian[ ham_row + iHandler->getL() * ham_col ] = - value;
+            sum_over_column += value;
+         } else {
+            laplacian[ ham_row + iHandler->getL() * ham_col ] = 0.0;
+         }
+      }
+      laplacian[ ham_row + iHandler->getL() * ham_row ] = sum_over_column;
+   }
+
+   // Calculate the eigenspectrum of the Laplacian
+   int lwork     = 3 * iHandler->getL() * iHandler->getL();
+   double * work = new double[ lwork ];
+   double * eigs = new double[ iHandler->getL() ];
+   char jobz     = 'V';
+   char uplo     = 'U';
+   int linsize   = iHandler->getL();
+   int info;
+   dsyev_( &jobz, &uplo, &linsize, laplacian, &linsize, eigs, work, &lwork, &info );
+   delete [] work;
+   delete [] eigs;
+
+   // Fill dmrg2ham
+   double * fiedler_vec = laplacian + linsize;
+   for ( int dummy = 0; dummy < linsize; dummy++ ){
+      int index = 0;
+      for ( int orb = 1; orb < linsize; orb++ ){
+         if ( fiedler_vec[ orb ] < fiedler_vec[ index ] ){ index = orb; }
+      }
+      dmrg2ham[ dummy ] = index;
+      fiedler_vec[ index ] = 2.0; // Eigenvectors are normalized to 1.0, so certainly OK
+   }
+
+   delete [] laplacian;
+
+   if ( printLevel > 0 ){
+      cout << "   EdmistonRuedenberg::FiedlerGlobal : Cost function at end   = " << FiedlerGlobalCost( iHandler, VMAT_ORIG, dmrg2ham ) << endl;
+      cout << "   EdmistonRuedenberg::FiedlerGlobal : Reordering = [ ";
+      for ( int orb = 0; orb < linsize - 1; orb++ ){ cout << dmrg2ham[ orb ] << ", "; }
+      cout << dmrg2ham[ linsize - 1 ] << " ]." << endl;
+   }
+
+}
 
 
